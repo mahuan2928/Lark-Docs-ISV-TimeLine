@@ -579,6 +579,26 @@ const parseBaseLink = (raw: string) => {
   }
 };
 
+const normalizeStoredConfig = (stored: Partial<TimelineConfig>): Partial<TimelineConfig> => {
+  const normalized: Partial<TimelineConfig> = {
+    ...stored,
+    // Always trust the backend URL from the current build over stale localStorage.
+    backendUrl: getDefaultBackendUrl(),
+  };
+
+  const parsedBase = parseBaseLink(typeof stored.baseLink === 'string' ? stored.baseLink : '');
+  if (parsedBase.tableId && stored.tableId && parsedBase.tableId !== stored.tableId) {
+    normalized.viewId = '';
+    return normalized;
+  }
+
+  if (!parsedBase.viewId) {
+    normalized.viewId = '';
+  }
+
+  return normalized;
+};
+
 const readRecentBases = () => {
   const parsed = safeJsonParse<RecentBaseOption[]>(localStorage.getItem(RECENT_BASES_STORAGE_KEY) || '');
   return parsed.ok && Array.isArray(parsed.value) ? parsed.value : [];
@@ -814,7 +834,18 @@ export default () => {
   const setCfgField = useCallback(
     <K extends keyof TimelineConfig>(key: K) =>
       (e: ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
-        setCfg((s) => ({ ...s, [key]: e.target.value as TimelineConfig[K] }));
+        const nextValue = e.target.value as TimelineConfig[K];
+        setCfg((s) => {
+          if (key === 'tableId') {
+            return {
+              ...s,
+              tableId: nextValue as TimelineConfig['tableId'],
+              // View ids are scoped to a table, so keep them from leaking across table switches.
+              viewId: '',
+            };
+          }
+          return { ...s, [key]: nextValue };
+        });
       },
     []
   );
@@ -861,11 +892,12 @@ export default () => {
       const docRef = await DocMiniApp.getActiveDocumentRef();
       const storageKey = getStorageKey(docRef);
       const parsed = safeJsonParse<Partial<TimelineConfig>>(localStorage.getItem(storageKey) || '');
+      const storedConfig = parsed.ok ? normalizeStoredConfig(parsed.value || {}) : {};
       setRuntimeContext({ docRef, storageKey });
       setCfg((prev) => ({
         ...createDefaultConfig(),
         ...prev,
-        ...(parsed.ok ? parsed.value : {}),
+        ...storedConfig,
       }));
       setIsConfigReady(true);
     })();
@@ -959,7 +991,7 @@ export default () => {
         baseLink: option.url,
         baseToken: option.baseToken,
         tableId: option.tableId || prev.tableId,
-        viewId: option.viewId || prev.viewId,
+        viewId: option.viewId || '',
       }));
       setError('');
       setIsBasePickerOpen(false);
@@ -1022,7 +1054,7 @@ export default () => {
       ...prev,
       baseToken: parsed.baseToken,
       tableId: parsed.tableId || prev.tableId,
-      viewId: parsed.viewId || prev.viewId,
+      viewId: parsed.viewId || '',
     }));
 
     setError('');
@@ -1035,7 +1067,7 @@ export default () => {
         const next: TimelineConfig = {
           ...prev,
           baseToken: parsed.baseToken,
-          viewId: json.viewId || parsed.viewId || prev.viewId,
+          viewId: json.viewId || parsed.viewId || '',
           tableId: json.tableId || parsed.tableId || prev.tableId || json.tables?.[0]?.id || '',
         };
         const recentItem: RecentBaseOption = {
