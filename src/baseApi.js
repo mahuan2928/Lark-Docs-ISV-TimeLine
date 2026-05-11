@@ -65,7 +65,21 @@ export const resolveBase = async (apiBaseUrl, baseUrl) =>
     body: JSON.stringify({ baseUrl }),
   });
 
-export const fetchBaseList = async (apiBaseUrl) => requestJson(apiBaseUrl, '/api/base/list');
+export const startLarkAuth = async (apiBaseUrl) => requestJson(apiBaseUrl, '/api/auth/lark/start');
+
+export const fetchLarkAuthSession = async (apiBaseUrl, state) => {
+  const url = new URL(toAbsoluteUrl(apiBaseUrl, '/api/auth/lark/session'));
+  url.searchParams.set('state', state);
+  return requestJson('', url.toString());
+};
+
+export const fetchBaseList = async (apiBaseUrl, authState) => {
+  const url = new URL(toAbsoluteUrl(apiBaseUrl, '/api/base/list'));
+  if (authState) {
+    url.searchParams.set('auth_state', authState);
+  }
+  return requestJson('', url.toString());
+};
 
 export const fetchBaseSchema = async (apiBaseUrl, params) => {
   const url = new URL(toAbsoluteUrl(apiBaseUrl, '/api/base/schema'));

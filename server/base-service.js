@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const appConfig = require('../app.json');
 
 class AppError extends Error {
@@ -15,12 +16,16 @@ const OPENAPI_BASE_URL = `${process.env.LARK_OPENAPI_BASE_URL || process.env.OPE
 );
 const APP_ID = `${process.env.LARK_APP_ID || process.env.APP_ID || appConfig.appID || ''}`.trim();
 const APP_SECRET = `${process.env.LARK_APP_SECRET || process.env.APP_SECRET || ''}`.trim();
+const USER_AUTH_SCOPES = `${process.env.LARK_USER_AUTH_SCOPES || process.env.LARK_OAUTH_SCOPES || ''}`.trim();
+const USER_AUTH_CALLBACK_PATH = '/api/auth/lark/callback';
+const AUTH_SESSION_TTL_MS = 2 * 60 * 60 * 1000;
 
 const tokenCache = {
   value: '',
   expiresAt: 0,
   pending: null,
 };
+const userAuthSessions = new Map();
 
 const buildQueryString = (query) => {
   const params = new URLSearchParams();
@@ -114,11 +119,13 @@ const ensureAppCredentials = () => {
   }
 };
 
-const requestOpenApiEnvelope = async ({ method = 'GET', path, query, body, skipAuth = false }) => {
+const requestOpenApiEnvelope = async ({ method = 'GET', path, query, body, skipAuth = false, accessToken }) => {
   const headers = {
     'Content-Type': 'application/json; charset=utf-8',
   };
-  if (!skipAuth) {
+  if (accessToken) {
+    headers.Authorization = `Bearer ${accessToken}`;
+  } else if (!skipAuth) {
     headers.Authorization = `Bearer ${await getTenantAccessToken()}`;
   }
 
@@ -139,6 +146,95 @@ const requestOpenApiEnvelope = async ({ method = 'GET', path, query, body, skipA
 const requestOpenApiData = async (options) => {
   const envelope = await requestOpenApiEnvelope(options);
   return envelope.data || {};
+};
+
+const generateOpaqueToken = (size = 24) => crypto.randomBytes(size).toString('base64url');
+
+const getRequestOrigin = (req) => {
+  const forwardedProto = `${req?.headers?.['x-forwarded-proto'] || ''}`.split(',')[0].trim();
+  const proto = forwardedProto || 'https';
+  const host = `${req?.headers?.['x-forwarded-host'] || req?.headers?.host || ''}`.split(',')[0].trim();
+  if (!host) {
+    throw new AppError('service_unavailable', 'Cannot determine request host', 503);
+  }
+  return `${proto}://${host}`;
+};
+
+const getOAuthRedirectUri = (req) => {
+  const configured = `${process.env.LARK_OAUTH_REDIRECT_URI || process.env.LARK_REDIRECT_URI || ''}`.trim();
+  if (configured) {
+    return configured;
+  }
+  return `${getRequestOrigin(req)}${USER_AUTH_CALLBACK_PATH}`;
+};
+
+const cleanupExpiredAuthSessions = () => {
+  const now = Date.now();
+  for (const [state, session] of userAuthSessions.entries()) {
+    if ((session.expiresAt || 0) <= now) {
+      userAuthSessions.delete(state);
+    }
+  }
+};
+
+const buildAuthorizeUrl = ({ req, state }) => {
+  if (!USER_AUTH_SCOPES) {
+    throw new AppError('service_unavailable', 'Missing LARK_USER_AUTH_SCOPES', 503);
+  }
+  const url = new URL('https://accounts.larksuite.com/open-apis/authen/v1/authorize');
+  url.searchParams.set('client_id', APP_ID);
+  url.searchParams.set('redirect_uri', getOAuthRedirectUri(req));
+  url.searchParams.set('scope', USER_AUTH_SCOPES);
+  url.searchParams.set('state', state);
+  return url.toString();
+};
+
+const exchangeAuthCodeForUserToken = async ({ code, req }) => {
+  ensureAppCredentials();
+  const envelope = await requestOpenApiEnvelope({
+    method: 'POST',
+    path: '/open-apis/authen/v2/oauth/token',
+    skipAuth: true,
+    body: {
+      grant_type: 'authorization_code',
+      client_id: APP_ID,
+      client_secret: APP_SECRET,
+      code,
+      redirect_uri: getOAuthRedirectUri(req),
+    },
+  });
+
+  const accessToken = `${envelope.access_token || ''}`.trim();
+  if (!accessToken) {
+    throw new AppError('authorization_required', 'Missing user access token', 401);
+  }
+
+  return {
+    accessToken,
+    expiresAt: Date.now() + Number(envelope.expires_in || 0) * 1000,
+    refreshToken: `${envelope.refresh_token || ''}`.trim(),
+    scope: `${envelope.scope || ''}`.trim(),
+  };
+};
+
+const getValidUserAccessToken = (authState) => {
+  cleanupExpiredAuthSessions();
+  const normalized = `${authState || ''}`.trim();
+  if (!normalized) {
+    return '';
+  }
+  const session = userAuthSessions.get(normalized);
+  if (!session) {
+    return '';
+  }
+  if (session.status !== 'authorized') {
+    return '';
+  }
+  if ((session.expiresAt || 0) <= Date.now()) {
+    userAuthSessions.delete(normalized);
+    return '';
+  }
+  return session.accessToken || '';
 };
 
 const getTenantAccessToken = async () => {
@@ -242,7 +338,7 @@ const normalizeDriveItemToBase = (item) => {
   };
 };
 
-const listBases = async ({ debug = false } = {}) => {
+const listBases = async ({ debug = false, accessToken } = {}) => {
   const bases = [];
   const debugItems = [];
   const typeSummary = new Map();
@@ -257,6 +353,7 @@ const listBases = async ({ debug = false } = {}) => {
         order_by: 'EditedTime',
         direction: 'DESC',
       },
+      accessToken,
     });
 
     const pageItems = Array.isArray(data.files) ? data.files : Array.isArray(data.items) ? data.items : [];
@@ -487,9 +584,86 @@ const sendError = (res, fallbackCode, fallbackMessage, error) => {
 };
 
 const attachBaseApiRoutes = (app) => {
+  app.get('/api/auth/lark/start', async (req, res) => {
+    try {
+      cleanupExpiredAuthSessions();
+      const state = generateOpaqueToken();
+      userAuthSessions.set(state, {
+        status: 'pending',
+        createdAt: Date.now(),
+        expiresAt: Date.now() + AUTH_SESSION_TTL_MS,
+      });
+      sendJson(res, 200, {
+        state,
+        authorizeUrl: buildAuthorizeUrl({ req, state }),
+      });
+    } catch (error) {
+      sendError(res, 'auth_start_failed', 'Auth start failed', error);
+    }
+  });
+
+  app.get(USER_AUTH_CALLBACK_PATH, async (req, res) => {
+    const state = `${req.query?.state || ''}`.trim();
+    const code = `${req.query?.code || ''}`.trim();
+    const errorMessage = `${req.query?.error || ''}`.trim();
+    const session = userAuthSessions.get(state);
+
+    res.statusCode = 200;
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+
+    if (!state || !session) {
+      res.end('<!doctype html><html><body>Invalid auth state. You can close this window.</body></html>');
+      return;
+    }
+
+    if (errorMessage) {
+      session.status = 'failed';
+      session.error = errorMessage;
+      session.expiresAt = Date.now() + 5 * 60 * 1000;
+      res.end('<!doctype html><html><body>Authorization was cancelled. You can close this window.</body></html>');
+      return;
+    }
+
+    try {
+      const tokenInfo = await exchangeAuthCodeForUserToken({ code, req });
+      session.status = 'authorized';
+      session.accessToken = tokenInfo.accessToken;
+      session.refreshToken = tokenInfo.refreshToken;
+      session.scope = tokenInfo.scope;
+      session.expiresAt = Math.min(tokenInfo.expiresAt || Date.now() + AUTH_SESSION_TTL_MS, Date.now() + AUTH_SESSION_TTL_MS);
+      res.end('<!doctype html><html><body>Authorization succeeded. You can close this window.</body></html>');
+    } catch (error) {
+      session.status = 'failed';
+      session.error = error instanceof Error ? error.message : 'Authorization failed';
+      session.expiresAt = Date.now() + 5 * 60 * 1000;
+      res.end('<!doctype html><html><body>Authorization failed. You can close this window.</body></html>');
+    }
+  });
+
+  app.get('/api/auth/lark/session', async (req, res) => {
+    cleanupExpiredAuthSessions();
+    const state = `${req.query?.state || ''}`.trim();
+    const session = userAuthSessions.get(state);
+    if (!state || !session) {
+      sendJson(res, 404, { code: 'authorization_required', status: 'missing' });
+      return;
+    }
+    sendJson(res, 200, {
+      status: session.status,
+      state,
+      scope: session.scope || '',
+      error: session.error || '',
+      expiresAt: session.expiresAt || 0,
+    });
+  });
+
   app.get('/api/base/list', async (req, res) => {
     try {
-      const payload = await listBases({ debug: req.query?.debug === '1' });
+      const accessToken = getValidUserAccessToken(req.query?.auth_state);
+      if (!accessToken) {
+        throw new AppError('authorization_required', 'User authorization required for listing Base files', 401);
+      }
+      const payload = await listBases({ debug: req.query?.debug === '1', accessToken });
       sendJson(res, 200, payload);
     } catch (error) {
       sendError(res, 'base_list_failed', 'Base list failed', error);

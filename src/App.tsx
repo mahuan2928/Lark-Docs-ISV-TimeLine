@@ -57,6 +57,19 @@ type BaseListResponse = {
   items: RecentBaseOption[];
 };
 
+type AuthStartResponse = {
+  state: string;
+  authorizeUrl: string;
+};
+
+type AuthSessionResponse = {
+  status: 'missing' | 'pending' | 'authorized' | 'failed';
+  state: string;
+  error?: string;
+  scope?: string;
+  expiresAt?: number;
+};
+
 type DetailState = {
   item: TimelineItem;
   rangeText: string;
@@ -97,6 +110,10 @@ type TranslationCopy = {
   recentlyUsed: string;
   allBases: string;
   noSearchResults: string;
+  authorizeBaseAccess: string;
+  authorizingBaseAccess: string;
+  baseAccessHint: string;
+  baseAccessPending: string;
   loadSchema: string;
   loadingSchema: string;
   loadingBases: string;
@@ -187,7 +204,9 @@ type TimelineConfig = {
 };
 
 const api = baseApi as {
-  fetchBaseList: (apiBaseUrl: string) => Promise<unknown>;
+  startLarkAuth: (apiBaseUrl: string) => Promise<unknown>;
+  fetchLarkAuthSession: (apiBaseUrl: string, state: string) => Promise<unknown>;
+  fetchBaseList: (apiBaseUrl: string, authState?: string) => Promise<unknown>;
   fetchBaseSchema: (apiBaseUrl: string, params: { baseToken: string; tableId?: string }) => Promise<unknown>;
   resolveBase: (apiBaseUrl: string, baseUrl: string) => Promise<unknown>;
   fetchBaseRecords: (
@@ -308,6 +327,10 @@ const translations: Record<Exclude<UILanguage, 'system'>, TranslationCopy> = {
     recentlyUsed: '最近使用',
     allBases: '全部 Base',
     noSearchResults: '没有匹配的 Base',
+    authorizeBaseAccess: '授权读取 Base',
+    authorizingBaseAccess: '授权中…',
+    baseAccessHint: '请先完成当前账号的数据授权，授权后才能列出你可访问的 Base。',
+    baseAccessPending: '授权页面已打开，完成授权后这里会自动刷新。',
     loadSchema: '读取表结构',
     loadingSchema: '读取中…',
     loadingBases: '加载 Base 中…',
@@ -397,6 +420,10 @@ const translations: Record<Exclude<UILanguage, 'system'>, TranslationCopy> = {
     recentlyUsed: 'Recently Used',
     allBases: 'All Bases',
     noSearchResults: 'No matching Base found',
+    authorizeBaseAccess: 'Authorize Base Access',
+    authorizingBaseAccess: 'Authorizing…',
+    baseAccessHint: 'Please authorize this account first before we can list the Bases you can access.',
+    baseAccessPending: 'The authorization page is open. This list will refresh automatically after approval.',
     loadSchema: 'Load Schema',
     loadingSchema: 'Loading…',
     loadingBases: 'Loading Bases…',
@@ -486,6 +513,10 @@ const translations: Record<Exclude<UILanguage, 'system'>, TranslationCopy> = {
     recentlyUsed: '最近使用',
     allBases: 'すべての Base',
     noSearchResults: '一致する Base がありません',
+    authorizeBaseAccess: 'Base へのアクセスを認可',
+    authorizingBaseAccess: '認可中…',
+    baseAccessHint: '現在のアカウントでデータ認可を完了すると、アクセス可能な Base を一覧できます。',
+    baseAccessPending: '認可ページを開きました。認可完了後、この一覧は自動更新されます。',
     loadSchema: 'テーブル構造を取得',
     loadingSchema: '取得中…',
     loadingBases: 'Base を読み込み中…',
@@ -865,6 +896,9 @@ export default () => {
   const [availableBases, setAvailableBases] = useState<RecentBaseOption[]>([]);
   const [baseSearchQuery, setBaseSearchQuery] = useState('');
   const [basePickerActiveIndex, setBasePickerActiveIndex] = useState(0);
+  const [authState, setAuthState] = useState('');
+  const [isAuthorizingBaseAccess, setIsAuthorizingBaseAccess] = useState(false);
+  const [authStatus, setAuthStatus] = useState<'idle' | 'pending' | 'authorized' | 'failed'>('idle');
   const [cfg, setCfg] = useState<TimelineConfig>(createDefaultConfig);
 
   const setCfgField = useCallback(
@@ -1051,19 +1085,71 @@ export default () => {
   const loadBaseOptions = useCallback(async () => {
     setIsBaseListLoading(true);
     try {
-      const json = (await api.fetchBaseList(cfg.backendUrl)) as BaseListResponse;
+      const json = (await api.fetchBaseList(cfg.backendUrl, authState || undefined)) as BaseListResponse;
       setAvailableBases(Array.isArray(json.items) ? dedupeBaseOptions(json.items) : []);
+      setAuthStatus((prev) => (prev === 'pending' ? 'authorized' : prev));
+      setError('');
     } catch (_e) {
       setAvailableBases([]);
+      const message = mapApiErrorToMessage(_e, t);
+      setError(message);
+      if ((_e as Error & { code?: string }).code === 'authorization_required') {
+        setAuthStatus((prev) => (prev === 'pending' ? 'pending' : 'failed'));
+      }
     } finally {
       setIsBaseListLoading(false);
     }
-  }, [cfg.backendUrl]);
+  }, [authState, cfg.backendUrl, t]);
 
   useEffect(() => {
     if (!isConfigReady) return;
     void loadBaseOptions();
   }, [cfg.backendUrl, isConfigReady, loadBaseOptions]);
+
+  useEffect(() => {
+    if (!authState || authStatus !== 'pending') {
+      return;
+    }
+    const timer = window.setInterval(async () => {
+      try {
+        const json = (await api.fetchLarkAuthSession(cfg.backendUrl, authState)) as AuthSessionResponse;
+        if (json.status === 'authorized') {
+          setAuthStatus('authorized');
+          setIsAuthorizingBaseAccess(false);
+          window.clearInterval(timer);
+          void loadBaseOptions();
+          return;
+        }
+        if (json.status === 'failed') {
+          setAuthStatus('failed');
+          setIsAuthorizingBaseAccess(false);
+          window.clearInterval(timer);
+          if (json.error) {
+            setError(json.error);
+          }
+        }
+      } catch (_error) {
+        // Ignore transient polling failures and let the next interval retry.
+      }
+    }, 1500);
+
+    return () => window.clearInterval(timer);
+  }, [authState, authStatus, cfg.backendUrl, loadBaseOptions]);
+
+  const startBaseAuthorization = useCallback(async () => {
+    setIsAuthorizingBaseAccess(true);
+    setError('');
+    try {
+      const json = (await api.startLarkAuth(cfg.backendUrl)) as AuthStartResponse;
+      setAuthState(json.state);
+      setAuthStatus('pending');
+      window.open(json.authorizeUrl, '_blank', 'noopener,noreferrer');
+    } catch (e) {
+      setIsAuthorizingBaseAccess(false);
+      setAuthStatus('failed');
+      setError(mapApiErrorToMessage(e, t));
+    }
+  }, [cfg.backendUrl, t]);
 
   const applyBaseSelection = useCallback(
     (option: RecentBaseOption) => {
@@ -1558,6 +1644,15 @@ export default () => {
                   </div>
                 ) : null}
               </>
+            ) : authStatus !== 'authorized' && !baseSearchQuery.trim() ? (
+              <div className="detail-section">
+                <div className="config-hint">{authStatus === 'pending' ? t.baseAccessPending : t.baseAccessHint}</div>
+                <div className="settings-actions settings-actions-compact">
+                  <button className="btn btn-secondary" onClick={startBaseAuthorization} disabled={isAuthorizingBaseAccess}>
+                    {isAuthorizingBaseAccess ? t.authorizingBaseAccess : t.authorizeBaseAccess}
+                  </button>
+                </div>
+              </div>
             ) : (
               <div className="config-hint">{baseSearchQuery.trim() ? t.noSearchResults : t.noRecentBases}</div>
             )}
