@@ -205,6 +205,27 @@ const buildBaseUrlFromToken = (baseToken) => {
   return `https://lark-japan.jp.larksuite.com/base/${baseToken}`;
 };
 
+const getDriveItemTypeParts = (item) => ({
+  type: `${item?.type || ''}`.trim(),
+  fileType: `${item?.file_type || ''}`.trim(),
+  objType: `${item?.obj_type || ''}`.trim(),
+  mimeType: `${item?.mime_type || item?.mimeType || ''}`.trim(),
+});
+
+const getDriveItemTypeSignature = (item) => {
+  const parts = getDriveItemTypeParts(item);
+  return [parts.type, parts.fileType, parts.objType, parts.mimeType].filter(Boolean).join(' | ') || '(empty)';
+};
+
+const isPotentialBaseItem = (item) => {
+  const { type, fileType, objType, mimeType } = getDriveItemTypeParts(item);
+  const haystack = [type, fileType, objType, mimeType, `${item?.url || item?.web_url || ''}`]
+    .join(' ')
+    .toLowerCase();
+
+  return haystack.includes('bitable') || haystack.includes('/base/') || /\bbase\b/.test(haystack);
+};
+
 const normalizeDriveItemToBase = (item) => {
   const baseToken = `${item?.token || item?.file_token || item?.obj_token || ''}`.trim();
   if (!baseToken) {
@@ -215,14 +236,16 @@ const normalizeDriveItemToBase = (item) => {
     id: baseToken,
     name: `${item?.name || item?.title || baseToken}`.trim(),
     baseToken,
-    type: `${item?.type || item?.file_type || 'bitable'}`.trim(),
-    url: buildBaseUrlFromToken(baseToken),
+    type: getDriveItemTypeSignature(item),
+    url: `${item?.url || item?.web_url || buildBaseUrlFromToken(baseToken)}`.trim(),
     ownerId: `${item?.owner_id || item?.ownerId || ''}`.trim(),
   };
 };
 
-const listBases = async () => {
+const listBases = async ({ debug = false } = {}) => {
   const bases = [];
+  const debugItems = [];
+  const typeSummary = new Map();
   let pageToken = '';
 
   while (true) {
@@ -237,8 +260,22 @@ const listBases = async () => {
     });
 
     const pageItems = Array.isArray(data.files) ? data.files : Array.isArray(data.items) ? data.items : [];
+    pageItems.forEach((item) => {
+      const signature = getDriveItemTypeSignature(item);
+      typeSummary.set(signature, (typeSummary.get(signature) || 0) + 1);
+    });
+    if (debug) {
+      debugItems.push(
+        ...pageItems.slice(0, 20).map((item) => ({
+          name: `${item?.name || item?.title || ''}`.trim(),
+          token: `${item?.token || item?.file_token || item?.obj_token || ''}`.trim(),
+          url: `${item?.url || item?.web_url || ''}`.trim(),
+          ...getDriveItemTypeParts(item),
+        }))
+      );
+    }
     const pageBases = pageItems
-      .filter((item) => `${item?.type || item?.file_type || ''}`.toLowerCase() === 'bitable')
+      .filter((item) => isPotentialBaseItem(item))
       .map(normalizeDriveItemToBase)
       .filter(Boolean);
 
@@ -253,7 +290,32 @@ const listBases = async () => {
     pageToken = data.page_token;
   }
 
-  return bases;
+  const items = dedupeBaseList(bases);
+  if (!debug) {
+    return { items };
+  }
+
+  return {
+    items,
+    debug: {
+      totalCandidates: items.length,
+      typeSummary: [...typeSummary.entries()]
+        .map(([signature, count]) => ({ signature, count }))
+        .sort((left, right) => right.count - left.count),
+      samples: debugItems,
+    },
+  };
+};
+
+const dedupeBaseList = (items) => {
+  const seen = new Set();
+  return items.filter((item) => {
+    if (!item?.baseToken || seen.has(item.baseToken)) {
+      return false;
+    }
+    seen.add(item.baseToken);
+    return true;
+  });
 };
 
 const listTables = async (baseToken) => {
@@ -425,10 +487,10 @@ const sendError = (res, fallbackCode, fallbackMessage, error) => {
 };
 
 const attachBaseApiRoutes = (app) => {
-  app.get('/api/base/list', async (_req, res) => {
+  app.get('/api/base/list', async (req, res) => {
     try {
-      const items = await listBases();
-      sendJson(res, 200, { items });
+      const payload = await listBases({ debug: req.query?.debug === '1' });
+      sendJson(res, 200, payload);
     } catch (error) {
       sendError(res, 'base_list_failed', 'Base list failed', error);
     }
