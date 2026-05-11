@@ -3,7 +3,7 @@
   "version": "0.0.1",
   "scripts": {
     "start": "cross-env NODE_ENV=development webpack-dev-server --mode development",
-    "backend:start": "sh -c 'PATH=\"/opt/homebrew/bin:/Users/bytedance/.nvm/versions/node/v24.14.1/bin:$PATH\" node ./server/index.js'",
+    "backend:start": "node ./server/index.js",
     "build": "cross-env NODE_ENV=production webpack --mode production",
     "opdev:login": "sh -c 'PATH=\"/opt/homebrew/bin:$PATH\" NODE_TLS_REJECT_UNAUTHORIZED=0 /opt/homebrew/bin/opdev login -e lark'",
     "opdev:whoami": "sh -c 'PATH=\"/opt/homebrew/bin:$PATH\" NODE_TLS_REJECT_UNAUTHORIZED=0 /opt/homebrew/bin/opdev whoami'",

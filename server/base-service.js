@@ -1,8 +1,4 @@
-const { execFile } = require('child_process');
-const fs = require('fs');
-const path = require('path');
-
-const cwd = process.cwd();
+const appConfig = require('../app.json');
 
 class AppError extends Error {
   constructor(code, message, status = 500) {
@@ -12,90 +8,178 @@ class AppError extends Error {
   }
 }
 
-const findNvmCliCandidates = () => {
-  const home = process.env.HOME;
-  if (!home) return [];
-  const versionsDir = path.join(home, '.nvm', 'versions', 'node');
-  if (!fs.existsSync(versionsDir)) return [];
+const DEFAULT_OPENAPI_BASE_URL = 'https://open.larksuite.com';
+const OPENAPI_BASE_URL = `${process.env.LARK_OPENAPI_BASE_URL || process.env.OPENAPI_BASE_URL || DEFAULT_OPENAPI_BASE_URL}`.replace(
+  /\/+$/,
+  ''
+);
+const APP_ID = `${process.env.LARK_APP_ID || process.env.APP_ID || appConfig.appID || ''}`.trim();
+const APP_SECRET = `${process.env.LARK_APP_SECRET || process.env.APP_SECRET || ''}`.trim();
 
-  return fs
-    .readdirSync(versionsDir, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory())
-    .map((entry) => path.join(versionsDir, entry.name, 'bin', 'lark-cli'))
-    .filter((candidate) => fs.existsSync(candidate))
-    .sort()
-    .reverse();
+const tokenCache = {
+  value: '',
+  expiresAt: 0,
+  pending: null,
 };
 
-const LARK_CLI_CANDIDATES = [
-  process.env.LARK_CLI_BIN,
-  '/opt/homebrew/bin/lark-cli',
-  '/opt/homebrew/Cellar/node@22/22.22.2_2/bin/lark-cli',
-  ...findNvmCliCandidates(),
-  'lark-cli',
-].filter(Boolean);
-
-const execLarkCli = (args) =>
-  new Promise((resolve, reject) => {
-    const tryAt = (idx) => {
-      if (idx >= LARK_CLI_CANDIDATES.length) {
-        reject(new AppError('service_unavailable', 'lark-cli is not available. Set LARK_CLI_BIN if needed.', 503));
-        return;
-      }
-
-      execFile(LARK_CLI_CANDIDATES[idx], args, { cwd, maxBuffer: 8 * 1024 * 1024 }, (error, stdout, stderr) => {
-        if (error && error.code === 'ENOENT') {
-          tryAt(idx + 1);
-          return;
-        }
-        if (error) {
-          const message = stderr || stdout || error.message;
-          reject(classifyCliError(message));
-          return;
-        }
-        try {
-          resolve(JSON.parse(stdout));
-        } catch (_parseError) {
-          reject(new AppError('service_unavailable', `lark-cli returned invalid JSON: ${stdout}`, 502));
-        }
-      });
-    };
-
-    tryAt(0);
+const buildQueryString = (query) => {
+  const params = new URLSearchParams();
+  Object.entries(query || {}).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === '') {
+      return;
+    }
+    params.set(key, `${value}`);
   });
-
-const classifyCliError = (message) => {
-  const normalized = `${message || ''}`.toLowerCase();
-  if (normalized.includes('need_user_authorization') || normalized.includes('no_token')) {
-    return new AppError('authorization_required', message, 401);
-  }
-  if (normalized.includes('permission denied') || normalized.includes('forbidden') || normalized.includes('permission_violations')) {
-    return new AppError('permission_denied', message, 403);
-  }
-  if (normalized.includes('not found') || normalized.includes('404') || normalized.includes('invalid base') || normalized.includes('base not found')) {
-    return new AppError('base_not_found', message, 404);
-  }
-  if (normalized.includes('invalid param') || normalized.includes('missing basetoken') || normalized.includes('missing basetoken or tableid')) {
-    return new AppError('invalid_request', message, 400);
-  }
-  return new AppError('service_unavailable', message, 502);
+  const serialized = params.toString();
+  return serialized ? `?${serialized}` : '';
 };
 
-const toPlainRecords = (recordPayload) => {
-  const rows = recordPayload?.data?.data || [];
-  const recordIds = recordPayload?.data?.record_id_list || [];
-  const fields = recordPayload?.data?.fields || [];
+const createOpenApiError = ({ status, code, msg, responseText }) => {
+  const normalized = `${msg || responseText || ''}`.toLowerCase();
 
-  return rows.map((row, index) => {
-    const mappedFields = {};
-    fields.forEach((fieldName, fieldIndex) => {
-      mappedFields[fieldName] = row[fieldIndex];
+  if (
+    status === 401 ||
+    code === 99991661 ||
+    code === 99991663 ||
+    normalized.includes('tenant_access_token') ||
+    normalized.includes('app_access_token')
+  ) {
+    return new AppError('service_unavailable', msg || 'OpenAPI authorization failed', 503);
+  }
+
+  if (
+    status === 403 ||
+    code === 1254302 ||
+    code === 99991672 ||
+    normalized.includes('permission denied') ||
+    normalized.includes('no permissions')
+  ) {
+    return new AppError('permission_denied', msg || 'Permission denied', 403);
+  }
+
+  if (code === 1254040 || code === 1254003 || normalized.includes('basetokennotfound')) {
+    return new AppError('base_not_found', msg || 'Base not found', 404);
+  }
+
+  if (code === 1254036 || code === 1254290 || code === 1254607 || code === 1255040 || normalized.includes('try again later')) {
+    return new AppError('service_unavailable', msg || 'Service unavailable', 503);
+  }
+
+  if (
+    status === 400 ||
+    code === 1254004 ||
+    code === 1254005 ||
+    code === 1254041 ||
+    code === 1254042 ||
+    normalized.includes('wrongtableid') ||
+    normalized.includes('wrongviewid') ||
+    normalized.includes('invalid')
+  ) {
+    return new AppError('invalid_request', msg || 'Invalid request', 400);
+  }
+
+  return new AppError('service_unavailable', msg || responseText || 'OpenAPI request failed', status >= 500 ? 503 : 502);
+};
+
+const parseOpenApiEnvelope = async (response) => {
+  const responseText = await response.text();
+  const trimmed = responseText.trim();
+
+  if (!trimmed) {
+    throw new AppError('service_unavailable', 'OpenAPI returned an empty response', 502);
+  }
+
+  let envelope;
+  try {
+    envelope = JSON.parse(trimmed);
+  } catch (_error) {
+    throw new AppError('service_unavailable', 'OpenAPI returned invalid JSON', 502);
+  }
+
+  if (!response.ok || envelope.code !== 0) {
+    throw createOpenApiError({
+      status: response.status,
+      code: envelope.code,
+      msg: envelope.msg,
+      responseText: trimmed,
     });
-    return {
-      record_id: recordIds[index],
-      fields: mappedFields,
-    };
-  });
+  }
+
+  return envelope;
+};
+
+const ensureAppCredentials = () => {
+  if (!APP_ID || !APP_SECRET) {
+    throw new AppError('service_unavailable', 'Missing LARK_APP_ID or LARK_APP_SECRET', 503);
+  }
+};
+
+const requestOpenApiEnvelope = async ({ method = 'GET', path, query, body, skipAuth = false }) => {
+  const headers = {
+    'Content-Type': 'application/json; charset=utf-8',
+  };
+  if (!skipAuth) {
+    headers.Authorization = `Bearer ${await getTenantAccessToken()}`;
+  }
+
+  let response;
+  try {
+    response = await fetch(`${OPENAPI_BASE_URL}${path}${buildQueryString(query)}`, {
+      method,
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch (error) {
+    throw new AppError('service_unavailable', error instanceof Error ? error.message : 'Network request failed', 503);
+  }
+
+  return parseOpenApiEnvelope(response);
+};
+
+const requestOpenApiData = async (options) => {
+  const envelope = await requestOpenApiEnvelope(options);
+  return envelope.data || {};
+};
+
+const getTenantAccessToken = async () => {
+  ensureAppCredentials();
+
+  const now = Date.now();
+  if (tokenCache.value && tokenCache.expiresAt - now > 5 * 60 * 1000) {
+    return tokenCache.value;
+  }
+
+  if (tokenCache.pending) {
+    return tokenCache.pending;
+  }
+
+  tokenCache.pending = (async () => {
+    const envelope = await requestOpenApiEnvelope({
+      method: 'POST',
+      path: '/open-apis/auth/v3/app_access_token/internal',
+      body: {
+        app_id: APP_ID,
+        app_secret: APP_SECRET,
+      },
+      skipAuth: true,
+    });
+
+    const tenantAccessToken = `${envelope.tenant_access_token || ''}`.trim();
+    const expireInSeconds = Number(envelope.expire || 0);
+    if (!tenantAccessToken || !Number.isFinite(expireInSeconds) || expireInSeconds <= 0) {
+      throw new AppError('service_unavailable', 'OpenAPI token response is missing tenant_access_token', 502);
+    }
+
+    tokenCache.value = tenantAccessToken;
+    tokenCache.expiresAt = Date.now() + expireInSeconds * 1000;
+    return tenantAccessToken;
+  })();
+
+  try {
+    return await tokenCache.pending;
+  } finally {
+    tokenCache.pending = null;
+  }
 };
 
 const parseBaseUrl = (rawUrl) => {
@@ -116,47 +200,86 @@ const parseBaseUrl = (rawUrl) => {
   }
 };
 
+const listTables = async (baseToken) => {
+  const tables = [];
+  let pageToken = '';
+
+  while (true) {
+    const data = await requestOpenApiData({
+      path: `/open-apis/bitable/v1/apps/${encodeURIComponent(baseToken)}/tables`,
+      query: {
+        page_size: 100,
+        page_token: pageToken || undefined,
+      },
+    });
+    const pageItems = Array.isArray(data.items) ? data.items : [];
+    tables.push(
+      ...pageItems.map((item) => ({
+        id: item.table_id,
+        name: item.name,
+        revision: item.revision,
+      }))
+    );
+
+    if (!data.has_more) {
+      break;
+    }
+    if (!data.page_token) {
+      throw new AppError('service_unavailable', 'OpenAPI pagination returned has_more without page_token', 502);
+    }
+    pageToken = data.page_token;
+  }
+
+  return tables;
+};
+
+const listFields = async ({ baseToken, tableId, viewId }) => {
+  const fields = [];
+  let pageToken = '';
+
+  while (true) {
+    const data = await requestOpenApiData({
+      path: `/open-apis/bitable/v1/apps/${encodeURIComponent(baseToken)}/tables/${encodeURIComponent(tableId)}/fields`,
+      query: {
+        view_id: viewId || undefined,
+        page_size: 100,
+        page_token: pageToken || undefined,
+      },
+    });
+    const pageItems = Array.isArray(data.items) ? data.items : [];
+    fields.push(
+      ...pageItems.map((item) => ({
+        id: item.field_id,
+        name: item.field_name,
+        type: `${item.ui_type || item.type || ''}`,
+      }))
+    );
+
+    if (!data.has_more) {
+      break;
+    }
+    if (!data.page_token) {
+      throw new AppError('service_unavailable', 'OpenAPI pagination returned has_more without page_token', 502);
+    }
+    pageToken = data.page_token;
+  }
+
+  return fields;
+};
+
 const getSchema = async ({ baseToken, tableId }) => {
   if (!baseToken) {
     throw new AppError('invalid_request', 'Missing baseToken', 400);
   }
 
-  const tablePayload = await execLarkCli([
-    'base',
-    '+table-list',
-    '--as',
-    'user',
-    '--base-token',
-    baseToken,
-    '--offset',
-    '0',
-    '--limit',
-    '100',
-  ]);
-  const tables = tablePayload?.data?.tables || [];
+  const tables = await listTables(baseToken);
   if (!tables.length) {
     throw new AppError('no_tables', 'No tables found in this Base', 404);
   }
 
-  let effectiveTableId = tableId || tables?.[0]?.id || '';
-  let fields = [];
-  if (effectiveTableId) {
-    const fieldPayload = await execLarkCli([
-      'base',
-      '+field-list',
-      '--as',
-      'user',
-      '--base-token',
-      baseToken,
-      '--table-id',
-      effectiveTableId,
-      '--offset',
-      '0',
-      '--limit',
-      '200',
-    ]);
-    fields = fieldPayload?.data?.fields || [];
-  }
+  const hasRequestedTable = tableId && tables.some((table) => table.id === tableId);
+  const effectiveTableId = hasRequestedTable ? tableId : tables[0].id;
+  const fields = effectiveTableId ? await listFields({ baseToken, tableId: effectiveTableId }) : [];
 
   return {
     baseToken,
@@ -171,38 +294,38 @@ const getRecords = async ({ baseToken, tableId, viewId }) => {
     throw new AppError('invalid_request', 'Missing baseToken or tableId', 400);
   }
 
-  let offset = 0;
-  const limit = 200;
   const records = [];
-  let hasMore = true;
+  let pageToken = '';
 
-  while (hasMore) {
-    const args = [
-      'base',
-      '+record-list',
-      '--as',
-      'user',
-      '--base-token',
-      baseToken,
-      '--table-id',
-      tableId,
-      '--offset',
-      `${offset}`,
-      '--limit',
-      `${limit}`,
-    ];
-    if (viewId) {
-      args.push('--view-id', viewId);
-    }
+  while (true) {
+    const data = await requestOpenApiData({
+      method: 'POST',
+      path: `/open-apis/bitable/v1/apps/${encodeURIComponent(baseToken)}/tables/${encodeURIComponent(tableId)}/records/search`,
+      query: {
+        page_size: 500,
+        page_token: pageToken || undefined,
+      },
+      body: {
+        view_id: viewId || undefined,
+        automatic_fields: false,
+      },
+    });
 
-    const recordPayload = await execLarkCli(args);
-    const pageRecords = toPlainRecords(recordPayload);
+    const pageRecords = Array.isArray(data.items)
+      ? data.items.map((item) => ({
+          record_id: item.record_id,
+          fields: item.fields || {},
+        }))
+      : [];
     records.push(...pageRecords);
-    hasMore = Boolean(recordPayload?.data?.has_more);
-    if (hasMore && pageRecords.length === 0) {
-      throw new AppError('service_unavailable', 'Unexpected pagination state: has_more=true but page has no records', 502);
+
+    if (!data.has_more) {
+      break;
     }
-    offset += limit;
+    if (!data.page_token || pageRecords.length === 0) {
+      throw new AppError('service_unavailable', 'Unexpected pagination state while reading records', 502);
+    }
+    pageToken = data.page_token;
   }
 
   return { records };

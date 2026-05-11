@@ -20,22 +20,20 @@ It exposes:
 
 ## Before You Start
 
-Make sure the following are ready on your local machine first:
+Make sure the following are ready:
 
-- `lark-cli` works
-- `lark-cli auth login --domain base` has already completed
-- the target account can access the Base you want to read
+- the app has Base-related OpenAPI scopes enabled
+- the app has access to the target Base
+- you can obtain the app secret from the platform console
 
-## Important Limitation
+## Current Architecture
 
-The current backend implementation shells out to `lark-cli`.
+The backend now calls official Base OpenAPI directly:
 
-That means Railway must be able to access:
+- app credentials -> `tenant_access_token`
+- `tenant_access_token` -> list tables / list fields / search records
 
-- a valid `lark-cli` binary
-- a valid user authorization state
-
-For a production-grade multi-tenant ISV backend, the next step should be replacing `lark-cli` calls with official OpenAPI token flows. The current Railway deployment is suitable for staging / early production validation, not the final multi-tenant architecture.
+This removes the previous dependency on `lark-cli` and user-side local authorization state.
 
 ## Railway Service Setup
 
@@ -65,15 +63,18 @@ Set these in Railway:
 ```bash
 PORT=8787
 TIMELINE_API_PORT=8787
+LARK_APP_ID=cli_a97adc137d79de17
+LARK_APP_SECRET=your_app_secret
+LARK_OPENAPI_BASE_URL=https://open.larksuite.com
 TIMELINE_API_BASE_URL=https://your-railway-service.up.railway.app
-LARK_CLI_BIN=/path/to/lark-cli
 ```
 
 Notes:
 
 - Railway will inject `PORT` automatically on most setups
 - `TIMELINE_API_BASE_URL` is used when building the frontend bundle
-- `LARK_CLI_BIN` is only needed if `lark-cli` is not already in `PATH`
+- `LARK_APP_ID` defaults to the app id in `app.json`, but setting it explicitly is clearer
+- `LARK_OPENAPI_BASE_URL` can stay as `https://open.larksuite.com` unless your environment requires another official OpenAPI domain
 
 ## Health Check
 
@@ -122,6 +123,8 @@ And:
 curl 'https://your-railway-service.up.railway.app/api/base/records?baseToken=xxx&tableId=yyy&viewId=zzz'
 ```
 
-## Recommended Next Step
+If the resolve request succeeds but records fail, check:
 
-After Railway deployment is stable, replace the current `lark-cli`-based data layer with direct OpenAPI integration so the backend does not depend on local-style CLI authorization behavior.
+- whether the app has Base permissions approved
+- whether the target Base granted access to the app
+- whether the selected table / view still exists
