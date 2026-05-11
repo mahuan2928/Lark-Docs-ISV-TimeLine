@@ -65,6 +65,8 @@ export const resolveBase = async (apiBaseUrl, baseUrl) =>
     body: JSON.stringify({ baseUrl }),
   });
 
+export const fetchBaseList = async (apiBaseUrl) => requestJson(apiBaseUrl, '/api/base/list');
+
 export const fetchBaseSchema = async (apiBaseUrl, params) => {
   const url = new URL(toAbsoluteUrl(apiBaseUrl, '/api/base/schema'));
   url.searchParams.set('baseToken', params.baseToken);

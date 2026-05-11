@@ -249,7 +249,7 @@ body {
   min-width: 100%;
   min-height: 100%;
   display: flex;
-  justify-content: center;
+  justify-content: flex-start;
   align-items: center;
 }
 
@@ -390,6 +390,7 @@ body {
   min-height: 240px;
   box-sizing: border-box;
   width: fit-content;
+  margin: 0 auto;
 }
 
 .timeline-line {
@@ -645,14 +646,13 @@ body {
   color: #1f2329;
 }
 
-.detail-inline-tip {
-  margin-top: 10px;
-  margin-bottom: 0;
-}
-
 .base-list {
   display: grid;
   gap: 10px;
+}
+
+.base-list-group + .base-list-group {
+  margin-top: 18px;
 }
 
 .base-list-item {
@@ -667,6 +667,15 @@ body {
 .base-list-item:hover {
   border-color: #3370ff;
   box-shadow: 0 4px 16px rgba(51, 112, 255, 0.08);
+}
+
+.base-list-item.is-active {
+  border-color: #3370ff;
+  background: #f5f8ff;
+}
+
+.base-list-item.is-keyboard-active {
+  box-shadow: 0 0 0 2px rgba(51, 112, 255, 0.18);
 }
 
 .base-list-name {

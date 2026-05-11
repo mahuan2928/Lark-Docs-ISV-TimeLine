@@ -200,6 +200,62 @@ const parseBaseUrl = (rawUrl) => {
   }
 };
 
+const buildBaseUrlFromToken = (baseToken) => {
+  if (!baseToken) return '';
+  return `https://lark-japan.jp.larksuite.com/base/${baseToken}`;
+};
+
+const normalizeDriveItemToBase = (item) => {
+  const baseToken = `${item?.token || item?.file_token || item?.obj_token || ''}`.trim();
+  if (!baseToken) {
+    return null;
+  }
+
+  return {
+    id: baseToken,
+    name: `${item?.name || item?.title || baseToken}`.trim(),
+    baseToken,
+    type: `${item?.type || item?.file_type || 'bitable'}`.trim(),
+    url: buildBaseUrlFromToken(baseToken),
+    ownerId: `${item?.owner_id || item?.ownerId || ''}`.trim(),
+  };
+};
+
+const listBases = async () => {
+  const bases = [];
+  let pageToken = '';
+
+  while (true) {
+    const data = await requestOpenApiData({
+      path: '/open-apis/drive/v1/files',
+      query: {
+        page_size: 200,
+        page_token: pageToken || undefined,
+        order_by: 'EditedTime',
+        direction: 'DESC',
+      },
+    });
+
+    const pageItems = Array.isArray(data.files) ? data.files : Array.isArray(data.items) ? data.items : [];
+    const pageBases = pageItems
+      .filter((item) => `${item?.type || item?.file_type || ''}`.toLowerCase() === 'bitable')
+      .map(normalizeDriveItemToBase)
+      .filter(Boolean);
+
+    bases.push(...pageBases);
+
+    if (!data.has_more) {
+      break;
+    }
+    if (!data.page_token) {
+      throw new AppError('service_unavailable', 'Drive pagination returned has_more without page_token', 502);
+    }
+    pageToken = data.page_token;
+  }
+
+  return bases;
+};
+
 const listTables = async (baseToken) => {
   const tables = [];
   let pageToken = '';
@@ -369,6 +425,15 @@ const sendError = (res, fallbackCode, fallbackMessage, error) => {
 };
 
 const attachBaseApiRoutes = (app) => {
+  app.get('/api/base/list', async (_req, res) => {
+    try {
+      const items = await listBases();
+      sendJson(res, 200, { items });
+    } catch (error) {
+      sendError(res, 'base_list_failed', 'Base list failed', error);
+    }
+  });
+
   app.post('/api/base/resolve', async (req, res) => {
     try {
       const body = await readJsonBody(req);
@@ -421,6 +486,7 @@ const attachBaseApiRoutes = (app) => {
 
 module.exports = {
   attachBaseApiRoutes,
+  listBases,
   getSchema,
   getRecords,
   parseBaseUrl,

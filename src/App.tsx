@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
 import { BlockitClient, type DocumentRef } from '@lark-opdev/block-docs-addon-api';
-import { fetchBaseRecords, fetchBaseSchema, resolveBase } from './baseApi.js';
+import * as baseApi from './baseApi.js';
 import './index.css';
 
 declare const __TIMELINE_API_BASE_URL__: string | undefined;
@@ -50,6 +50,11 @@ type RecentBaseOption = {
   baseToken: string;
   tableId?: string;
   viewId?: string;
+  ownerId?: string;
+};
+
+type BaseListResponse = {
+  items: RecentBaseOption[];
 };
 
 type DetailState = {
@@ -86,20 +91,18 @@ type TranslationCopy = {
   recentBases: string;
   noRecentBases: string;
   useThisBase: string;
-  importBase: string;
-  importBaseHint: string;
-  showImportBase: string;
-  hideImportBase: string;
+  searchBase: string;
+  searchBasePlaceholder: string;
+  currentBase: string;
+  recentlyUsed: string;
+  allBases: string;
+  noSearchResults: string;
   loadSchema: string;
   loadingSchema: string;
+  loadingBases: string;
   loadData: string;
   loadingData: string;
   dataSource: string;
-  baseLink: string;
-  baseLinkPlaceholder: string;
-  autoDetect: string;
-  autoDetecting: string;
-  invalidBaseLink: string;
   advancedSettings: string;
   showAdvanced: string;
   hideAdvanced: string;
@@ -183,6 +186,16 @@ type TimelineConfig = {
   pastedJson: string;
 };
 
+const api = baseApi as {
+  fetchBaseList: (apiBaseUrl: string) => Promise<unknown>;
+  fetchBaseSchema: (apiBaseUrl: string, params: { baseToken: string; tableId?: string }) => Promise<unknown>;
+  resolveBase: (apiBaseUrl: string, baseUrl: string) => Promise<unknown>;
+  fetchBaseRecords: (
+    apiBaseUrl: string,
+    params: { baseToken: string; tableId: string; viewId?: string }
+  ) => Promise<unknown>;
+};
+
 const STORAGE_KEY_PREFIX = 'timeline.config.v1';
 const DEFAULT_STORAGE_KEY = `${STORAGE_KEY_PREFIX}:default`;
 const RECENT_BASES_STORAGE_KEY = 'timeline.recent-bases.v1';
@@ -197,7 +210,7 @@ const getDefaultBackendUrl = () => {
 const createDefaultConfig = (): TimelineConfig => ({
   mode: 'backend',
   uiLanguage: 'system',
-  baseLink: 'https://lark-japan.jp.larksuite.com/base/ZWFvb2JuIawDbYsLHtSjQP4spZg?from=from_copylink',
+  baseLink: '',
   backendUrl: getDefaultBackendUrl(),
   baseToken: 'ZWFvb2JuIawDbYsLHtSjQP4spZg',
   tableId: 'tblH0MytgDjxieFS',
@@ -286,23 +299,21 @@ const translations: Record<Exclude<UILanguage, 'system'>, TranslationCopy> = {
     changeBase: '更换 Base',
     selectedBase: '已选 Base',
     noBaseSelected: '尚未选择 Base',
-    recentBases: '最近使用',
-    noRecentBases: '暂无可选 Base',
+    recentBases: '可选 Base',
+    noRecentBases: '暂无可访问的 Base',
     useThisBase: '使用这个 Base',
-    importBase: '手动导入 Base',
-    importBaseHint: '如果列表里没有目标 Base，可在这里粘贴链接导入一次。',
-    showImportBase: '没有找到目标 Base？手动导入',
-    hideImportBase: '收起手动导入',
+    searchBase: '搜索 Base',
+    searchBasePlaceholder: '按名称或 Token 搜索',
+    currentBase: '当前已选',
+    recentlyUsed: '最近使用',
+    allBases: '全部 Base',
+    noSearchResults: '没有匹配的 Base',
     loadSchema: '读取表结构',
     loadingSchema: '读取中…',
+    loadingBases: '加载 Base 中…',
     loadData: '加载数据',
     loadingData: '加载中…',
     dataSource: '数据源',
-    baseLink: 'Base 链接',
-    baseLinkPlaceholder: '贴入 Base 分享链接',
-    autoDetect: '自动识别',
-    autoDetecting: '识别中…',
-    invalidBaseLink: '无法从当前链接中识别 Base Token，请检查链接是否正确。',
     advancedSettings: '高级设置',
     showAdvanced: '展开高级设置',
     hideAdvanced: '收起高级设置',
@@ -377,23 +388,21 @@ const translations: Record<Exclude<UILanguage, 'system'>, TranslationCopy> = {
     changeBase: 'Change Base',
     selectedBase: 'Selected Base',
     noBaseSelected: 'No Base selected',
-    recentBases: 'Recent Bases',
-    noRecentBases: 'No Base available',
+    recentBases: 'Available Bases',
+    noRecentBases: 'No accessible Base available',
     useThisBase: 'Use This Base',
-    importBase: 'Import Base Manually',
-    importBaseHint: 'If the target Base is not listed, paste the shared link here once to import it.',
-    showImportBase: 'Can’t find your Base? Import manually',
-    hideImportBase: 'Hide Manual Import',
+    searchBase: 'Search Base',
+    searchBasePlaceholder: 'Search by name or token',
+    currentBase: 'Current',
+    recentlyUsed: 'Recently Used',
+    allBases: 'All Bases',
+    noSearchResults: 'No matching Base found',
     loadSchema: 'Load Schema',
     loadingSchema: 'Loading…',
+    loadingBases: 'Loading Bases…',
     loadData: 'Load Data',
     loadingData: 'Loading…',
     dataSource: 'Data Source',
-    baseLink: 'Base Link',
-    baseLinkPlaceholder: 'Paste a shared Base link',
-    autoDetect: 'Auto Detect',
-    autoDetecting: 'Detecting…',
-    invalidBaseLink: 'Cannot extract a Base token from the current link. Please check the URL.',
     advancedSettings: 'Advanced Settings',
     showAdvanced: 'Show Advanced',
     hideAdvanced: 'Hide Advanced',
@@ -468,23 +477,21 @@ const translations: Record<Exclude<UILanguage, 'system'>, TranslationCopy> = {
     changeBase: 'Base を変更',
     selectedBase: '選択中の Base',
     noBaseSelected: 'Base が未選択です',
-    recentBases: '最近使った Base',
-    noRecentBases: '選択できる Base がありません',
+    recentBases: '選択可能な Base',
+    noRecentBases: 'アクセス可能な Base がありません',
     useThisBase: 'この Base を使う',
-    importBase: 'Base を手動追加',
-    importBaseHint: '一覧に対象 Base がない場合は、ここに共有リンクを貼り付けて一度追加できます。',
-    showImportBase: '対象 Base がない場合は手動追加',
-    hideImportBase: '手動追加を閉じる',
+    searchBase: 'Base を検索',
+    searchBasePlaceholder: '名前または Token で検索',
+    currentBase: '現在選択中',
+    recentlyUsed: '最近使用',
+    allBases: 'すべての Base',
+    noSearchResults: '一致する Base がありません',
     loadSchema: 'テーブル構造を取得',
     loadingSchema: '取得中…',
+    loadingBases: 'Base を読み込み中…',
     loadData: 'データを読み込む',
     loadingData: '読み込み中…',
     dataSource: 'データソース',
-    baseLink: 'Base リンク',
-    baseLinkPlaceholder: '共有された Base リンクを貼り付け',
-    autoDetect: '自動認識',
-    autoDetecting: '認識中…',
-    invalidBaseLink: '現在のリンクから Base Token を識別できません。URL を確認してください。',
     advancedSettings: '詳細設定',
     showAdvanced: '詳細設定を表示',
     hideAdvanced: '詳細設定を閉じる',
@@ -606,6 +613,32 @@ const readRecentBases = () => {
 
 const writeRecentBases = (items: RecentBaseOption[]) => {
   localStorage.setItem(RECENT_BASES_STORAGE_KEY, JSON.stringify(items.slice(0, 8)));
+};
+
+const dedupeBaseOptions = (items: RecentBaseOption[]) => {
+  const seen = new Set<string>();
+  const result: RecentBaseOption[] = [];
+  items.forEach((item) => {
+    const key = item.baseToken || item.id;
+    if (!key || seen.has(key)) {
+      return;
+    }
+    seen.add(key);
+    result.push(item);
+  });
+  return result;
+};
+
+const sortBaseOptions = (items: RecentBaseOption[], recentItems: RecentBaseOption[]) => {
+  const recentOrder = new Map(recentItems.map((item, index) => [item.baseToken, index]));
+  return [...items].sort((left, right) => {
+    const leftRank = recentOrder.has(left.baseToken) ? recentOrder.get(left.baseToken)! : Number.MAX_SAFE_INTEGER;
+    const rightRank = recentOrder.has(right.baseToken) ? recentOrder.get(right.baseToken)! : Number.MAX_SAFE_INTEGER;
+    if (leftRank !== rightRank) {
+      return leftRank - rightRank;
+    }
+    return left.name.localeCompare(right.name, undefined, { sensitivity: 'base' });
+  });
 };
 
 const normalizeFieldName = (value: string) => value.trim().toLowerCase();
@@ -818,17 +851,20 @@ export default () => {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isAdvancedOpen, setIsAdvancedOpen] = useState(false);
   const [isBasePickerOpen, setIsBasePickerOpen] = useState(false);
-  const [isImportBaseOpen, setIsImportBaseOpen] = useState(false);
   const [detailState, setDetailState] = useState<DetailState>(null);
   const [isDetailListOpen, setIsDetailListOpen] = useState(false);
   const [drawerWidth, setDrawerWidth] = useState(720);
   const [isLoading, setIsLoading] = useState(false);
   const [isSchemaLoading, setIsSchemaLoading] = useState(false);
+  const [isBaseListLoading, setIsBaseListLoading] = useState(false);
   const [error, setError] = useState<string>('');
   const [records, setRecords] = useState<BaseRecord[]>([]);
   const [tables, setTables] = useState<BaseTable[]>([]);
   const [fields, setFields] = useState<BaseField[]>([]);
   const [recentBases, setRecentBases] = useState<RecentBaseOption[]>([]);
+  const [availableBases, setAvailableBases] = useState<RecentBaseOption[]>([]);
+  const [baseSearchQuery, setBaseSearchQuery] = useState('');
+  const [basePickerActiveIndex, setBasePickerActiveIndex] = useState(0);
   const [cfg, setCfg] = useState<TimelineConfig>(createDefaultConfig);
 
   const setCfgField = useCallback(
@@ -972,9 +1008,37 @@ export default () => {
   const timelineItems = useMemo(() => aggregateTimeline(records, cfg, t), [records, cfg, t]);
   const fieldNames = useMemo(() => fields.map((item) => item.name), [fields]);
   const selectedBase = useMemo(
-    () => recentBases.find((item) => item.baseToken === cfg.baseToken) || null,
-    [recentBases, cfg.baseToken]
+    () => [...availableBases, ...recentBases].find((item) => item.baseToken === cfg.baseToken) || null,
+    [availableBases, recentBases, cfg.baseToken]
   );
+  const baseOptions = useMemo(
+    () => sortBaseOptions(dedupeBaseOptions([...recentBases, ...availableBases]), recentBases),
+    [availableBases, recentBases]
+  );
+  const filteredBaseOptions = useMemo(() => {
+    const keyword = baseSearchQuery.trim().toLowerCase();
+    if (!keyword) {
+      return baseOptions;
+    }
+    return baseOptions.filter((item) => {
+      const name = item.name.toLowerCase();
+      const token = item.baseToken.toLowerCase();
+      return name.includes(keyword) || token.includes(keyword);
+    });
+  }, [baseOptions, baseSearchQuery]);
+  const recentBaseSet = useMemo(() => new Set(recentBases.map((item) => item.baseToken)), [recentBases]);
+  const recentFilteredBases = useMemo(
+    () => filteredBaseOptions.filter((item) => recentBaseSet.has(item.baseToken)),
+    [filteredBaseOptions, recentBaseSet]
+  );
+  const otherFilteredBases = useMemo(
+    () => filteredBaseOptions.filter((item) => !recentBaseSet.has(item.baseToken)),
+    [filteredBaseOptions, recentBaseSet]
+  );
+
+  useEffect(() => {
+    setBasePickerActiveIndex(0);
+  }, [baseSearchQuery, isBasePickerOpen]);
 
   const formatDateRange = useCallback(
     (startAt?: Date, endAt?: Date) => {
@@ -984,16 +1048,38 @@ export default () => {
     [t]
   );
 
+  const loadBaseOptions = useCallback(async () => {
+    setIsBaseListLoading(true);
+    try {
+      const json = (await api.fetchBaseList(cfg.backendUrl)) as BaseListResponse;
+      setAvailableBases(Array.isArray(json.items) ? dedupeBaseOptions(json.items) : []);
+    } catch (_e) {
+      setAvailableBases([]);
+    } finally {
+      setIsBaseListLoading(false);
+    }
+  }, [cfg.backendUrl]);
+
+  useEffect(() => {
+    if (!isConfigReady) return;
+    void loadBaseOptions();
+  }, [cfg.backendUrl, isConfigReady, loadBaseOptions]);
+
   const applyBaseSelection = useCallback(
     (option: RecentBaseOption) => {
       setCfg((prev) => ({
         ...prev,
         baseLink: option.url,
         baseToken: option.baseToken,
-        tableId: option.tableId || prev.tableId,
+        tableId: option.tableId || '',
         viewId: option.viewId || '',
       }));
+      setTables([]);
+      setFields([]);
+      setRecords([]);
       setError('');
+      setBaseSearchQuery('');
+      setBasePickerActiveIndex(0);
       setIsBasePickerOpen(false);
       setRecentBases((prev) => {
         const next = [option, ...prev.filter((item) => item.baseToken !== option.baseToken)].slice(0, 8);
@@ -1012,7 +1098,7 @@ export default () => {
       if (!baseToken) {
         throw new Error(t.baseTokenRequired);
       }
-      const json = (await fetchBaseSchema(cfg.backendUrl, {
+      const json = (await api.fetchBaseSchema(cfg.backendUrl, {
         baseToken,
         tableId: cfg.tableId.trim() || undefined,
       })) as BaseSchemaResponse & { error?: string };
@@ -1042,65 +1128,6 @@ export default () => {
     t.schemaLoadFailed,
   ]);
 
-  const autoDetectBase = useCallback(async () => {
-    setError('');
-    const parsed = parseBaseLink(cfg.baseLink);
-    if (!parsed.baseToken) {
-      setError(t.invalidBaseLink);
-      return;
-    }
-
-    setCfg((prev) => ({
-      ...prev,
-      baseToken: parsed.baseToken,
-      tableId: parsed.tableId || prev.tableId,
-      viewId: parsed.viewId || '',
-    }));
-
-    setError('');
-    setIsSchemaLoading(true);
-    try {
-      const json = (await resolveBase(cfg.backendUrl, cfg.baseLink)) as BaseSchemaResponse & { error?: string };
-      setTables(Array.isArray(json.tables) ? json.tables : []);
-      setFields(Array.isArray(json.fields) ? json.fields : []);
-      setCfg((prev) => {
-        const next: TimelineConfig = {
-          ...prev,
-          baseToken: parsed.baseToken,
-          viewId: json.viewId || parsed.viewId || '',
-          tableId: json.tableId || parsed.tableId || prev.tableId || json.tables?.[0]?.id || '',
-        };
-        const recentItem: RecentBaseOption = {
-          id: parsed.baseToken,
-          name: json.tables?.[0]?.name || parsed.baseToken,
-          url: cfg.baseLink,
-          baseToken: parsed.baseToken,
-          tableId: next.tableId,
-          viewId: next.viewId,
-        };
-        setRecentBases((prevRecent) => {
-          const nextRecent = [recentItem, ...prevRecent.filter((item) => item.baseToken !== recentItem.baseToken)].slice(0, 8);
-          writeRecentBases(nextRecent);
-          return nextRecent;
-        });
-        return {
-          ...next,
-          ...recommendFieldMappings(json.fields || [], next),
-        };
-      });
-    } catch (e) {
-      const message = mapApiErrorToMessage(e, t);
-      setError(message);
-    } finally {
-      setIsSchemaLoading(false);
-    }
-  }, [
-    cfg.baseLink,
-    t.invalidBaseLink,
-    t.requestFailed,
-    t.schemaLoadFailed,
-  ]);
-
   useEffect(() => {
     if (!isConfigReady) return;
     if (cfg.mode !== 'backend') return;
@@ -1112,7 +1139,7 @@ export default () => {
     setError('');
     setIsLoading(true);
     try {
-      const json = (await fetchBaseRecords(cfg.backendUrl, {
+      const json = (await api.fetchBaseRecords(cfg.backendUrl, {
         baseToken: cfg.baseToken.trim(),
         tableId: cfg.tableId.trim(),
         viewId: cfg.viewId.trim() || undefined,
@@ -1215,8 +1242,8 @@ export default () => {
         </div>
 
         <div className="settings-actions">
-          <button className="btn btn-secondary" onClick={autoDetectBase} disabled={isSchemaLoading}>
-            {isSchemaLoading ? t.autoDetecting : t.autoDetect}
+          <button className="btn btn-secondary" onClick={loadBaseOptions} disabled={isBaseListLoading}>
+            {isBaseListLoading ? t.loadingBases : t.chooseBase}
           </button>
           <button className="btn" onClick={loadData} disabled={isLoading}>
             {isLoading ? t.loadingData : t.loadData}
@@ -1240,11 +1267,30 @@ export default () => {
           <div className="config-row">
             <label className="config-label">{t.selectedBase}</label>
             <div className="base-selector">
-              <div className="base-selector-value">
-                <div className="base-selector-name">{selectedBase?.name || t.noBaseSelected}</div>
-                <div className="base-selector-sub">{selectedBase?.baseToken || cfg.baseToken || t.unrecognized}</div>
-              </div>
-              <button className="btn btn-secondary" onClick={() => setIsBasePickerOpen(true)}>
+              <select
+                className="config-input"
+                value={cfg.baseToken}
+                onChange={(e) => {
+                  const next = baseOptions.find((item) => item.baseToken === e.target.value);
+                  if (next) {
+                    applyBaseSelection(next);
+                  }
+                }}
+              >
+                <option value="">{isBaseListLoading ? t.loadingBases : t.noBaseSelected}</option>
+                {baseOptions.map((base) => (
+                  <option key={base.baseToken} value={base.baseToken}>
+                    {base.name}
+                  </option>
+                ))}
+              </select>
+              <button
+                className="btn btn-secondary"
+                onClick={() => {
+                  setBaseSearchQuery('');
+                  setIsBasePickerOpen(true);
+                }}
+              >
                 {selectedBase ? t.changeBase : t.chooseBase}
               </button>
             </div>
@@ -1426,44 +1472,95 @@ export default () => {
             </button>
           </div>
           <div className="detail-section">
-            <div className="detail-label">{t.recentBases}</div>
-            {recentBases.length > 0 ? (
-              <div className="base-list">
-                {recentBases.map((base) => (
-                  <button key={base.id} className="base-list-item" onClick={() => applyBaseSelection(base)}>
-                    <div className="base-list-name">{base.name}</div>
-                    <div className="base-list-sub">{base.baseToken}</div>
-                    <div className="base-list-action">{t.useThisBase}</div>
-                  </button>
-                ))}
-              </div>
-            ) : (
-              <div className="config-hint">{t.noRecentBases}</div>
-            )}
-          </div>
-          <div className="detail-section">
-            <button className="detail-expand-btn" onClick={() => setIsImportBaseOpen((prev) => !prev)}>
-              <span>{t.importBase}</span>
-              <span>{isImportBaseOpen ? t.hideImportBase : t.showImportBase}</span>
-            </button>
-            {isImportBaseOpen ? (
+            <div className="config-row">
+              <label className="config-label">{t.searchBase}</label>
+              <input
+                className="config-input"
+                value={baseSearchQuery}
+                onChange={(e) => setBaseSearchQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') {
+                    e.preventDefault();
+                    setBaseSearchQuery('');
+                    setIsBasePickerOpen(false);
+                    return;
+                  }
+                  if (filteredBaseOptions.length === 0) {
+                    return;
+                  }
+                  if (e.key === 'ArrowDown') {
+                    e.preventDefault();
+                    setBasePickerActiveIndex((prev) => (prev + 1) % filteredBaseOptions.length);
+                    return;
+                  }
+                  if (e.key === 'ArrowUp') {
+                    e.preventDefault();
+                    setBasePickerActiveIndex((prev) => (prev - 1 + filteredBaseOptions.length) % filteredBaseOptions.length);
+                    return;
+                  }
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    const next = filteredBaseOptions[basePickerActiveIndex] || filteredBaseOptions[0];
+                    if (next) {
+                      applyBaseSelection(next);
+                    }
+                  }
+                }}
+                placeholder={t.searchBasePlaceholder}
+              />
+            </div>
+            {filteredBaseOptions.length > 0 ? (
               <>
-                <div className="config-tip detail-inline-tip">{t.importBaseHint}</div>
-                <div className="config-row">
-                  <input
-                    className="config-input"
-                    value={cfg.baseLink}
-                    onChange={setCfgField('baseLink')}
-                    placeholder={t.baseLinkPlaceholder}
-                  />
-                </div>
-                <div className="settings-actions settings-actions-compact">
-                  <button className="btn btn-secondary" onClick={autoDetectBase} disabled={isSchemaLoading}>
-                    {isSchemaLoading ? t.autoDetecting : t.autoDetect}
-                  </button>
-                </div>
+                {recentFilteredBases.length > 0 ? (
+                  <div className="base-list-group">
+                    <div className="detail-label">{t.recentlyUsed}</div>
+                    <div className="base-list">
+                      {recentFilteredBases.map((base) => {
+                        const activeBase = filteredBaseOptions[basePickerActiveIndex];
+                        return (
+                          <button
+                            key={base.id}
+                            className={`base-list-item ${base.baseToken === cfg.baseToken ? 'is-active' : ''} ${activeBase?.baseToken === base.baseToken ? 'is-keyboard-active' : ''}`}
+                            onClick={() => applyBaseSelection(base)}
+                          >
+                            <div className="base-list-name">{base.name}</div>
+                            <div className="base-list-sub">{base.baseToken}</div>
+                            <div className="base-list-action">
+                              {base.baseToken === cfg.baseToken ? t.currentBase : t.useThisBase}
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ) : null}
+                {otherFilteredBases.length > 0 ? (
+                  <div className="base-list-group">
+                    <div className="detail-label">{t.allBases}</div>
+                    <div className="base-list">
+                      {otherFilteredBases.map((base) => {
+                        const activeBase = filteredBaseOptions[basePickerActiveIndex];
+                        return (
+                          <button
+                            key={base.id}
+                            className={`base-list-item ${base.baseToken === cfg.baseToken ? 'is-active' : ''} ${activeBase?.baseToken === base.baseToken ? 'is-keyboard-active' : ''}`}
+                            onClick={() => applyBaseSelection(base)}
+                          >
+                            <div className="base-list-name">{base.name}</div>
+                            <div className="base-list-sub">{base.baseToken}</div>
+                            <div className="base-list-action">
+                              {base.baseToken === cfg.baseToken ? t.currentBase : t.useThisBase}
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ) : null}
               </>
-            ) : null}
+            ) : (
+              <div className="config-hint">{baseSearchQuery.trim() ? t.noSearchResults : t.noRecentBases}</div>
+            )}
           </div>
         </div>
       ) : null}
